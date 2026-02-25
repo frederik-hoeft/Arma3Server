@@ -52,21 +52,40 @@ def preset(mod_file, session, config=None):
     plans = []
     plans_lock = threading.Lock()
     
+    # Thread-safe progress counter
+    progress_counter = [0]  # Using list for mutable closure
+    progress_lock = threading.Lock()
+    total_mods = len(mods)
+    
+    # Thread-local storage for per-worker sessions
+    thread_local = threading.local()
+    
+    def get_thread_session():
+        """Get or create a session for the current worker thread."""
+        if not hasattr(thread_local, 'session'):
+            thread_local.session = session.clone(connect=True)
+        return thread_local.session
+    
     def build_plan(workshop_id):
         """Build sync plan for a single workshop item (runs in thread)."""
-        # Each thread uses a cloned session for isolation
-        thread_session = session.clone(connect=True)
+        thread_session = get_thread_session()
         try:
             plan = thread_session.plan_workshop_sync(workshop_id)
             with plans_lock:
                 plans.append((workshop_id, plan))
         except Exception as e:
-            print(f"Failed to build sync plan for workshop {workshop_id}: {e}")
             with plans_lock:
                 plans.append((workshop_id, None))
+            with progress_lock:
+                print(f"Failed to build sync plan for workshop {workshop_id}: {e}")
+        
+        # Thread-safe progress update
+        with progress_lock:
+            progress_counter[0] += 1
+            print(f"[{progress_counter[0]}/{total_mods}] Built sync plan for workshop {workshop_id}")
     
     # Phase 1: Parallel manifest fetching and diff construction
-    print(f"Building sync plans for {len(mods)} mods (max {max_workers} workers)...")
+    print(f"Building sync plans for {total_mods} mods (max {max_workers} workers)...")
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         executor.map(build_plan, mods)
     
