@@ -58,16 +58,25 @@ if os.environ["SKIP_INSTALL"] in ["", "false"]:
     if not session:
         print("Failed to login to Steam, exiting...")
         exit(1)
-    session.download_depot(233781) # Default Content
-    session.download_depot(233783) # Linux Server
+    
+    # Build depot sync plans
+    depot_plans = [
+        session.plan_depot_sync(233781),  # Default Content
+        session.plan_depot_sync(233783),  # Linux Server
+    ]
     if os.environ["ARMA_BINARY"] == "arma3serverprofiling_x64":
-        session.download_depot(233785) # Arma 3 Profiling
+        depot_plans.append(session.plan_depot_sync(233785))  # Arma 3 Profiling
 
     for cdlc in os.environ["ARMA_CDLC"].split(";"):
         if cdlc:
             cdlc = cdlc.lower()
             print("Downloading CDLC:", cdlc)
-            session.download_depot(api.CDLC_IDS[cdlc])
+            depot_plans.append(session.plan_depot_sync(api.CDLC_IDS[cdlc]))
+    
+    # Execute depot sync plans
+    for plan in depot_plans:
+        if plan:
+            plan.execute()
 
 # Mods
 
@@ -76,7 +85,7 @@ mods = []
 if os.environ["MODS_PRESET"] != "":
     if not session:
         session = api.SteamSession.login(os.environ["STEAM_USER"], os.environ["STEAM_PASSWORD"], config=api_config)
-    mods.extend(workshop.preset(os.environ["MODS_PRESET"], session))
+    mods.extend(workshop.preset(os.environ["MODS_PRESET"], session, config=api_config))
 
 if os.environ["MODS_LOCAL"] == "true" and os.path.exists("mods"):
     mods.extend(local.mods("mods"))

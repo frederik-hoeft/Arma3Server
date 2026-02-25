@@ -3,19 +3,26 @@ import re
 import subprocess
 import urllib.request
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 from pathlib import Path
 
 import keys
+from api.config import resolve_config
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.47 Safari/537.36"  # noqa: E501
 
-def preset(mod_file, session):
+def preset(mod_file, session, config=None):
     """Download mods from a preset HTML file.
+    
+    Uses parallel manifest fetching and diff construction, followed by
+    sequential mod-by-mod downloads.
     
     Args:
         mod_file: Path or URL to the preset HTML file.
         session: SteamSession instance for downloading mods.
+        config: Optional config map (uses download_max_workers for parallelism).
         
     Returns:
         List of mod directory paths.
@@ -29,16 +36,52 @@ def preset(mod_file, session):
         with open("preset.html", "wb") as f:
             f.write(remote.read())
         mod_file = "preset.html"
+    
     mods = []
-    moddirs = []
     with open(mod_file) as f:
         html = f.read()
         regex = r"filedetails\/\?id=(\d+)\""
         matches = re.finditer(regex, html, re.MULTILINE)
         for _, match in enumerate(matches, start=1):
-            mods.append(match.group(1))
-            session.download_workshop(int(match.group(1)))
-            moddirs.append("workshop/" + match.group(1))
-        for moddir in moddirs:
-            keys.copy("server/"+moddir)
+            mods.append(int(match.group(1)))
+    
+    resolved_config = resolve_config(config)
+    max_workers = resolved_config.get("download_max_workers", 4)
+    
+    # Thread-safe collection for sync plans
+    plans = []
+    plans_lock = threading.Lock()
+    
+    def build_plan(workshop_id):
+        """Build sync plan for a single workshop item (runs in thread)."""
+        # Each thread uses a cloned session for isolation
+        thread_session = session.clone(connect=True)
+        try:
+            plan = thread_session.plan_workshop_sync(workshop_id)
+            with plans_lock:
+                plans.append((workshop_id, plan))
+        except Exception as e:
+            print(f"Failed to build sync plan for workshop {workshop_id}: {e}")
+            with plans_lock:
+                plans.append((workshop_id, None))
+    
+    # Phase 1: Parallel manifest fetching and diff construction
+    print(f"Building sync plans for {len(mods)} mods (max {max_workers} workers)...")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        executor.map(build_plan, mods)
+    
+    # Phase 2: Sequential downloads
+    moddirs = []
+    for workshop_id, plan in plans:
+        moddir = "workshop/" + str(workshop_id)
+        if plan is None:
+            print(f"Skipping workshop {workshop_id} due to plan construction failure.")
+            continue
+        plan.execute()
+        moddirs.append(moddir)
+    
+    # Copy keys after all downloads
+    for moddir in moddirs:
+        keys.copy("server/" + moddir)
+    
     return moddirs

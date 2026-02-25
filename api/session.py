@@ -20,56 +20,12 @@ from .manifest import ManifestCache
 from .sync import ContentSyncer
 
 
-# Module-level CDN client cache
-_cached_cdn_client = None
-_cached_steam_client_id = None
-
-
-def _get_cdn_client(client, config=None):
-    """Return a cached CDNClient or build one with retries.
-
-    Args:
-        client: Authenticated SteamClient instance.
-        config: Config map containing cdn_client_retries/base_delay.
-
-    Returns:
-        CDNClient or None if construction failed after retries.
-    """
-    global _cached_cdn_client, _cached_steam_client_id
-
-    resolved = resolve_config(config)
-    retries = resolved["cdn_client_retries"]
-    base_delay = resolved["cdn_client_base_delay"]
-
-    if _cached_cdn_client and _cached_steam_client_id == id(client):
-        return _cached_cdn_client
-
-    last_error = None
-    for attempt in range(1, retries + 1):
-        try:
-            cdn_client = CDNClient(client)
-            _cached_cdn_client = cdn_client
-            _cached_steam_client_id = id(client)
-            return cdn_client
-        except Exception as exc:
-            last_error = exc
-            print(f"CDNClient init failed (attempt {attempt}/{retries}): {exc}")
-            if attempt < retries:
-                time.sleep(base_delay * attempt)
-
-    print(f"CDNClient could not be initialized after {retries} attempts; giving up. Last error: {last_error}")
-    return None
-
-
-def _clear_cdn_cache():
-    """Clear the cached CDN client."""
-    global _cached_cdn_client, _cached_steam_client_id
-    _cached_cdn_client = None
-    _cached_steam_client_id = None
-
-
 class SteamSession:
     """Facade wrapping Steam and CDN clients with automatic session reset on consecutive failures.
+    
+    Each SteamSession instance is fully isolated with its own SteamClient and CDNClient,
+    enabling safe concurrent use across multiple sessions. No state is shared between
+    session instances.
     
     After SESSION_RESET_THRESHOLD consecutive failures, performs a full session reset
     (new SteamClient, new login, new CDNClient) to recover from transient Steam API issues.
@@ -77,6 +33,8 @@ class SteamSession:
 
     def __init__(self, username, password, config=None):
         """Initialize session with credentials but don't connect yet.
+        
+        Creates a fully isolated session instance with no shared state.
         
         Args:
             username: Steam username.
@@ -91,13 +49,35 @@ class SteamSession:
         self._consecutive_failures = 0
         self._lock = threading.Lock()
 
+    def _build_cdn_client(self):
+        """Build a new CDNClient with retries.
+        
+        Returns:
+            CDNClient or None if construction failed after retries.
+        """
+        resolved = resolve_config(self._config)
+        retries = resolved["cdn_client_retries"]
+        base_delay = resolved["cdn_client_base_delay"]
+
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                return CDNClient(self._client)
+            except Exception as exc:
+                last_error = exc
+                print(f"CDNClient init failed (attempt {attempt}/{retries}): {exc}")
+                if attempt < retries:
+                    time.sleep(base_delay * attempt)
+
+        print(f"CDNClient could not be initialized after {retries} attempts; giving up. Last error: {last_error}")
+        return None
+
     def _reset_session(self):
         """Perform full session reset: new SteamClient, login, and CDNClient."""
         print("Performing full Steam session reset...")
         self._client = None
         self._cdn_client = None
         self._consecutive_failures = 0
-        _clear_cdn_cache()
         self._ensure_connected()
 
     def _ensure_connected(self):
@@ -108,8 +88,7 @@ class SteamSession:
             print("Logged in to Steam as", self._client.user.name)
         
         if self._cdn_client is None:
-            resolved = resolve_config(self._config)
-            self._cdn_client = _get_cdn_client(self._client, resolved)
+            self._cdn_client = self._build_cdn_client()
             if self._cdn_client is None:
                 raise RuntimeError("Failed to initialize CDN client")
 
@@ -245,11 +224,14 @@ class SteamSession:
         self._ensure_connected()
         return self._client.user
 
-    def download_depot(self, depot_id):
-        """Sync a depot by manifest with automatic retry/reset.
+    def plan_depot_sync(self, depot_id):
+        """Construct a sync plan for a depot without executing.
 
         Args:
             depot_id: Depot ID to sync.
+            
+        Returns:
+            SyncPlan that can be executed via plan.execute().
         """
         resolved_config = resolve_config(self._config)
         manifest_cache = ManifestCache()
@@ -275,7 +257,7 @@ class SteamSession:
         target_manifest = next((m for m in manifests if m['depot_id'] == depot_id), None)
         if not target_manifest:
             print(f"No manifest found for depot ID {depot_id}")
-            return
+            return None
         
         print(f"Downloading Manifest ID: {target_manifest['gid']}, Depot ID: {target_manifest['depot_id']}")
 
@@ -287,13 +269,16 @@ class SteamSession:
         files = [f for f in files if f.is_file]
         
         syncer = ContentSyncer(DEPOT_INDEX_DIR, config=resolved_config)
-        syncer.sync(files, DEPOT_ROOT, depot_id, f"Depot {depot_id}")
+        return syncer.sync(files, DEPOT_ROOT, depot_id, f"Depot {depot_id}")
 
-    def download_workshop(self, workshop_id):
-        """Sync a workshop item by manifest with indexed incremental updates.
+    def plan_workshop_sync(self, workshop_id):
+        """Construct a sync plan for a workshop item without executing.
 
         Args:
             workshop_id: Workshop ID to sync.
+            
+        Returns:
+            SyncPlan that can be executed via plan.execute().
         """
         resolved_config = resolve_config(self._config)
         workshop_manifest = self.get_manifest_for_workshop_item(workshop_id)
@@ -301,7 +286,26 @@ class SteamSession:
         destination = os.path.join(WORKSHOP_ROOT, str(workshop_id))
         
         syncer = ContentSyncer(WORKSHOP_INDEX_DIR, config=resolved_config)
-        syncer.sync(files, destination, workshop_id, f"Workshop {workshop_id}")
+        return syncer.sync(files, destination, workshop_id, f"Workshop {workshop_id}")
+
+    def clone(self, connect=False):
+        """Create a new isolated session with the same credentials and config.
+        
+        The cloned session has completely independent state (new SteamClient,
+        new CDNClient, reset failure counters). Useful for parallel operations
+        requiring separate Steam connections.
+        
+        Args:
+            connect: If True, connect the cloned session before returning.
+                     If False (default), return an unconnected session.
+        
+        Returns:
+            A new SteamSession instance with the same credentials and config.
+        """
+        cloned = SteamSession(self._username, self._password, config=self._config)
+        if connect:
+            cloned._ensure_connected()
+        return cloned
 
     @staticmethod
     def login(username, password, config=None):

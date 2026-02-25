@@ -92,6 +92,174 @@ def remove_local_files(entries):
             print(f"Warning: failed to delete {local_path}")
 
 
+class SyncPlan:
+    """Represents a computed sync diff that can be executed later.
+    
+    Enables separating manifest fetching/diff computation from actual downloads,
+    allowing concurrent diff construction followed by sequential execution.
+    """
+
+    def __init__(
+        self,
+        state_manager,
+        item_id,
+        label,
+        destination,
+        config,
+        remote_state,
+        to_download,
+        to_delete,
+        unchanged,
+        up_to_date=False,
+        empty=False,
+    ):
+        """Initialize a sync plan with diff results.
+        
+        Args:
+            state_manager: StateManager instance for persisting state.
+            item_id: Depot or workshop ID.
+            label: Human-readable label for logging.
+            destination: Local root where files should land.
+            config: Resolved config map.
+            remote_state: Remote state dict from build_remote_state.
+            to_download: List of entries to download.
+            to_delete: List of entries to delete locally.
+            unchanged: List of unchanged entries.
+            up_to_date: True if no sync is needed.
+            empty: True if manifest has no files.
+        """
+        self._state_manager = state_manager
+        self._item_id = item_id
+        self._label = label
+        self._destination = destination
+        self._config = config
+        self._remote_state = remote_state
+        self._to_download = to_download
+        self._to_delete = to_delete
+        self._unchanged = unchanged
+        self._up_to_date = up_to_date
+        self._empty = empty
+        self._executed = False
+
+    @property
+    def up_to_date(self):
+        """True if content is already up-to-date, no downloads needed."""
+        return self._up_to_date
+
+    @property
+    def empty(self):
+        """True if manifest has no files."""
+        return self._empty
+
+    @property
+    def needs_download(self):
+        """True if there are files to download."""
+        return bool(self._to_download) and not self._up_to_date and not self._empty
+
+    @property
+    def download_count(self):
+        """Number of files to download."""
+        return len(self._to_download) if self._to_download else 0
+
+    @property
+    def delete_count(self):
+        """Number of files to delete."""
+        return len(self._to_delete) if self._to_delete else 0
+
+    @property
+    def unchanged_count(self):
+        """Number of unchanged files."""
+        return len(self._unchanged) if self._unchanged else 0
+
+    @property
+    def total_count(self):
+        """Total number of files in remote manifest."""
+        if self._remote_state:
+            return len(self._remote_state.get("files", []))
+        return 0
+
+    @property
+    def label(self):
+        """Human-readable label for this sync plan."""
+        return self._label
+
+    @property
+    def item_id(self):
+        """Depot or workshop ID."""
+        return self._item_id
+
+    def execute(self):
+        """Execute the sync plan: delete obsolete files, download new/changed files, persist state.
+        
+        Returns:
+            True if execution completed, False if skipped (up-to-date/empty/already executed).
+        """
+        if self._executed:
+            print(f"{self._label}: already executed, skipping.")
+            return False
+
+        self._executed = True
+
+        if self._empty:
+            print(f"{self._label} has no files in manifest.")
+            return False
+
+        if self._up_to_date:
+            short_hash = self._remote_state["combined_hash"][:7]
+            print(f"{self._label} is up-to-date (version {short_hash}).")
+            return False
+
+        print(f"{self._label}: {self.total_count} files in manifest.")
+        print(f"  Unchanged: {self.unchanged_count} | To download/update: {self.download_count} | To delete: {self.delete_count}")
+
+        remove_local_files(self._to_delete)
+        remove_local_files(self._to_download)
+
+        entry_map = {entry["path"]: entry for entry in self._to_download}
+
+        if self._to_download:
+            def _checkpoint(file_obj):
+                path = normalize_path(file_obj.local)
+                entry = entry_map.get(path)
+                if not entry:
+                    return
+                checkpoint = {
+                    "path": entry["path"],
+                    "file_hash": entry["file_hash"],
+                    "content_hash": entry["content_hash"],
+                    "size": entry.get("size", 0),
+                    "downloaded_at": time.time(),
+                }
+                self._state_manager.write_file_entry(self._item_id, checkpoint)
+
+            downloader = Downloader(config=self._config)
+            downloader.download_files(
+                [entry["file"] for entry in self._to_download],
+                destination=self._destination,
+                post_download_hook=_checkpoint,
+            )
+
+        updated_state = self._state_manager.load_state(self._item_id) or {}
+        local_map = {entry["path"]: entry for entry in updated_state.get("files", [])}
+        now = time.time()
+        persisted_files = []
+
+        for entry in self._remote_state["files"]:
+            previous = local_map.get(entry["path"])
+            timestamp = previous.get("downloaded_at") if previous and previous.get("file_hash") == entry["file_hash"] else now
+            persisted_files.append({
+                "path": entry["path"],
+                "file_hash": entry["file_hash"],
+                "content_hash": entry["content_hash"],
+                "size": entry.get("size", 0),
+                "downloaded_at": timestamp,
+            })
+
+        self._state_manager.save_state(self._item_id, self._remote_state["combined_hash"], persisted_files)
+        print(f"{self._label} stored (version {self._remote_state['combined_hash'][:7]}).")
+        return True
+
+
 class ContentSyncer:
     """Handles incremental content synchronization."""
 
@@ -106,17 +274,34 @@ class ContentSyncer:
         self._config = resolve_config(config)
 
     def sync(self, files, destination, item_id, label):
-        """Incrementally sync a depot/workshop set using manifest diffs and cached index.
+        """Construct a sync plan from manifest diffs without executing downloads.
+        
+        Compares remote manifest against local cached state and returns a SyncPlan
+        that can be executed later. This enables concurrent diff construction
+        across multiple items followed by sequential download execution.
 
         Args:
             files: Iterable of CDN file objects from the manifest.
             destination: Local root where files should land.
             item_id: Depot or workshop ID used for index names.
             label: Human-readable label for logging.
+            
+        Returns:
+            SyncPlan object that can be executed via plan.execute().
         """
         if not files:
-            print(f"{label} has no files in manifest.")
-            return
+            return SyncPlan(
+                state_manager=self.state_manager,
+                item_id=item_id,
+                label=label,
+                destination=destination,
+                config=self._config,
+                remote_state=None,
+                to_download=[],
+                to_delete=[],
+                unchanged=[],
+                empty=True,
+            )
 
         remote_state, _ = build_remote_state(destination, files)
         local_state = self.state_manager.load_state(item_id)
@@ -132,63 +317,29 @@ class ContentSyncer:
             local_state = None
 
         if local_state and local_state.get("combined_hash") == remote_state["combined_hash"]:
-            short_hash = remote_state["combined_hash"][:7]
-            updated_at = local_state.get("updated_at", 0)
-            if updated_at:
-                from datetime import datetime
-                date_str = datetime.fromtimestamp(updated_at).strftime("%Y-%m-%d %H:%M")
-                print(f"{label} is up-to-date (version {short_hash}, last updated {date_str}).")
-            else:
-                print(f"{label} is up-to-date (version {short_hash}).")
-            return
+            return SyncPlan(
+                state_manager=self.state_manager,
+                item_id=item_id,
+                label=label,
+                destination=destination,
+                config=self._config,
+                remote_state=remote_state,
+                to_download=[],
+                to_delete=[],
+                unchanged=remote_state.get("files", []),
+                up_to_date=True,
+            )
 
         to_download, to_delete, unchanged = diff_states(remote_state, local_state)
 
-        print(f"{label}: {len(remote_state['files'])} files in manifest.")
-        print(f"  Unchanged: {len(unchanged)} | To download/update: {len(to_download)} | To delete: {len(to_delete)}")
-
-        remove_local_files(to_delete)
-        remove_local_files(to_download)
-
-        entry_map = {entry["path"]: entry for entry in to_download}
-
-        if to_download:
-            def _checkpoint(file_obj):
-                path = normalize_path(file_obj.local)
-                entry = entry_map.get(path)
-                if not entry:
-                    return
-                checkpoint = {
-                    "path": entry["path"],
-                    "file_hash": entry["file_hash"],
-                    "content_hash": entry["content_hash"],
-                    "size": entry.get("size", 0),
-                    "downloaded_at": time.time(),
-                }
-                self.state_manager.write_file_entry(item_id, checkpoint)
-
-            downloader = Downloader(config=self._config)
-            downloader.download_files(
-                [entry["file"] for entry in to_download],
-                destination=destination,
-                post_download_hook=_checkpoint,
-            )
-
-        updated_state = self.state_manager.load_state(item_id) or {}
-        local_map = {entry["path"]: entry for entry in updated_state.get("files", [])}
-        now = time.time()
-        persisted_files = []
-
-        for entry in remote_state["files"]:
-            previous = local_map.get(entry["path"])
-            timestamp = previous.get("downloaded_at") if previous and previous.get("file_hash") == entry["file_hash"] else now
-            persisted_files.append({
-                "path": entry["path"],
-                "file_hash": entry["file_hash"],
-                "content_hash": entry["content_hash"],
-                "size": entry.get("size", 0),
-                "downloaded_at": timestamp,
-            })
-
-        self.state_manager.save_state(item_id, remote_state["combined_hash"], persisted_files)
-        print(f"{label} stored (version {remote_state['combined_hash'][:7]}).")
+        return SyncPlan(
+            state_manager=self.state_manager,
+            item_id=item_id,
+            label=label,
+            destination=destination,
+            config=self._config,
+            remote_state=remote_state,
+            to_download=to_download,
+            to_delete=to_delete,
+            unchanged=unchanged,
+        )
