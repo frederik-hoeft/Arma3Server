@@ -28,6 +28,7 @@ DEFAULT_CONFIG = {
     "cdn_op_retries": 3,
     "cdn_op_base_delay": 1.5,
     "download_max_workers": 4,
+    "plan_max_workers": 2,
     "download_chunk_size": 4 * 1024 * 1024,
     "download_progress_interval": 60,
     "validate_local": False,

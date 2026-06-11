@@ -46,7 +46,8 @@ def preset(mod_file, session, config=None):
             mods.append(int(match.group(1)))
     
     resolved_config = resolve_config(config)
-    max_workers = resolved_config.get("download_max_workers", 4)
+    max_plan_workers = resolved_config.get("plan_max_workers", 2)
+    max_download_workers = resolved_config.get("download_max_workers", 4)
     
     # Thread-safe collection for sync plans
     plans = []
@@ -85,8 +86,8 @@ def preset(mod_file, session, config=None):
             print(f"[{progress_counter[0]}/{total_mods}] Built sync plan for workshop {workshop_id}")
     
     # Phase 1: Parallel manifest fetching and diff construction
-    print(f"Building sync plans for {total_mods} mods (max {max_workers} workers)...")
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    print(f"Building sync plans for {total_mods} mods (max {max_plan_workers} workers)...")
+    with ThreadPoolExecutor(max_workers=max_plan_workers) as executor:
         executor.map(build_plan, mods)
     
     # Phase 2: Sequential downloads
