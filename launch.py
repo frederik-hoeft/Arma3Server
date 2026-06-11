@@ -46,6 +46,7 @@ api_config = {
     "download_chunk_size": env_int("ARMA_DOWNLOAD_CHUNK_SIZE", 4 * 1024 * 1024),
     "download_progress_interval": env_int("ARMA_DOWNLOAD_PROGRESS_INTERVAL", 60),
     "validate_local": env_int("ARMA_VALIDATE_LOCAL", 0) == 1,
+    "skip_sync": env_int("ARMA_SKIP_SYNC", 0) == 1,
 }
 
 if env_defined("CLEAR_KEYS") and os.environ["CLEAR_KEYS"] == "true" and os.path.isdir(KEYS):

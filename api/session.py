@@ -228,6 +228,11 @@ class SteamSession:
             SyncPlan that can be executed via plan.execute().
         """
         resolved_config = resolve_config(self._config)
+        syncer = ContentSyncer(DEPOT_INDEX_DIR, config=resolved_config)
+
+        if resolved_config.get("skip_sync"):
+            return syncer.skip(depot_id, DEPOT_ROOT, f"Depot {depot_id}")
+
         manifest_cache = ManifestCache()
         cached_manifests = manifest_cache.load()
         
@@ -261,8 +266,7 @@ class SteamSession:
             filter_func=lambda d_id, depot_info: d_id == target_manifest['depot_id'],
         )
         files = [f for f in files if f.is_file]
-        
-        syncer = ContentSyncer(DEPOT_INDEX_DIR, config=resolved_config)
+
         return syncer.sync(files, DEPOT_ROOT, depot_id, f"Depot {depot_id}")
 
     def plan_workshop_sync(self, workshop_id):
@@ -275,11 +279,15 @@ class SteamSession:
             SyncPlan that can be executed via plan.execute().
         """
         resolved_config = resolve_config(self._config)
+        syncer = ContentSyncer(WORKSHOP_INDEX_DIR, config=resolved_config)
+        destination = os.path.join(WORKSHOP_ROOT, str(workshop_id))
+
+        if resolved_config.get("skip_sync"):
+            return syncer.skip(workshop_id, destination, f"Workshop {workshop_id}")
+
         workshop_manifest = self.get_manifest_for_workshop_item(workshop_id)
         files = [f for f in workshop_manifest.iter_files() if f.is_file]
-        destination = os.path.join(WORKSHOP_ROOT, str(workshop_id))
-        
-        syncer = ContentSyncer(WORKSHOP_INDEX_DIR, config=resolved_config)
+
         return syncer.sync(files, destination, workshop_id, f"Workshop {workshop_id}")
 
     def clone(self, connect=False):

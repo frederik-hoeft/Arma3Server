@@ -300,6 +300,36 @@ class ContentSyncer:
         self.state_manager = StateManager(index_root)
         self._config = resolve_config(config)
 
+    def skip(self, item_id, destination, label):
+        """Return an up-to-date plan from local state without touching the CDN.
+
+        Used when skip_sync is set to bypass all manifest fetching.
+
+        Args:
+            item_id: Depot or workshop ID.
+            destination: Local root where files land.
+            label: Human-readable label for logging.
+
+        Returns:
+            SyncPlan with up_to_date=True built from local state.
+        """
+        local_state = self.state_manager.load_state(item_id)
+        files = local_state.get("files", []) if local_state else []
+        combined = local_state.get("combined_hash", "skipped") if local_state else "skipped"
+        print(f"{label}: skip_sync is set, assuming local state is up-to-date ({len(files)} file(s)).")
+        return SyncPlan(
+            state_manager=self.state_manager,
+            item_id=item_id,
+            label=label,
+            destination=destination,
+            config=self._config,
+            remote_state={"combined_hash": combined, "files": files},
+            to_download=[],
+            to_delete=[],
+            unchanged=files,
+            up_to_date=True,
+        )
+
     def sync(self, files, destination, item_id, label):
         """Construct a sync plan from manifest diffs without executing downloads.
         

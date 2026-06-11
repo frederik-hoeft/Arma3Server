@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
     "download_chunk_size": 4 * 1024 * 1024,
     "download_progress_interval": 60,
     "validate_local": False,
+    "skip_sync": False,
     "cdn_session_reset_threshold": 3,
 }
 
