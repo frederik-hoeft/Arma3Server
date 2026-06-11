@@ -4,7 +4,6 @@ import os
 
 # Steam app constants
 ARMA3_SERVER_APP_ID = 233780
-SESSION_RESET_THRESHOLD = 3  # Consecutive failures before full session reset
 
 # Cache paths
 CACHE_DIR = "/arma3/cache"
@@ -31,6 +30,8 @@ DEFAULT_CONFIG = {
     "download_max_workers": 4,
     "download_chunk_size": 4 * 1024 * 1024,
     "download_progress_interval": 60,
+    "validate_local": False,
+    "cdn_session_reset_threshold": 3,
 }
 
 # Creator DLC depot IDs

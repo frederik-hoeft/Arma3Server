@@ -8,7 +8,6 @@ from steam.client import SteamClient
 from steam.client.cdn import CDNClient
 
 from .config import (
-    SESSION_RESET_THRESHOLD,
     ARMA3_SERVER_APP_ID,
     DEPOT_ROOT,
     DEPOT_INDEX_DIR,
@@ -43,7 +42,7 @@ class SteamSession:
         """
         self._username = username
         self._password = password
-        self._config = config
+        self._config = resolve_config(config)
         self._client = None
         self._cdn_client = None
         self._consecutive_failures = 0
@@ -105,7 +104,7 @@ class SteamSession:
         """
         with self._lock:
             self._consecutive_failures += 1
-            if self._consecutive_failures >= SESSION_RESET_THRESHOLD:
+            if self._consecutive_failures >= self._config["cdn_session_reset_threshold"]:
                 print(f"Hit {self._consecutive_failures} consecutive failures, resetting session...")
                 self._reset_session()
                 return True

@@ -9,7 +9,8 @@ from .state import (
     normalize_path, 
     content_hash_hex, 
     compute_file_hash, 
-    combined_mod_hash
+    combined_mod_hash,
+    hash_file_content,
 )
 from .download import Downloader
 
@@ -216,12 +217,25 @@ class SyncPlan:
         remove_local_files(self._to_download)
 
         entry_map = {entry["path"]: entry for entry in self._to_download}
+        verified_entries = {}  # path -> checkpoint dict for files verified this run
 
         if self._to_download:
             def _checkpoint(file_obj):
                 path = normalize_path(file_obj.local)
                 entry = entry_map.get(path)
                 if not entry:
+                    return
+                try:
+                    actual_hash = hash_file_content(file_obj.local)
+                except OSError:
+                    print(f"Warning: could not read {file_obj.filename} for hash verification, skipping checkpoint")
+                    return
+                if actual_hash != entry["content_hash"]:
+                    print(f"Warning: hash mismatch for {file_obj.filename}: expected {entry['content_hash']}, got {actual_hash}")
+                    try:
+                        os.remove(file_obj.local)
+                    except OSError:
+                        pass
                     return
                 checkpoint = {
                     "path": entry["path"],
@@ -231,13 +245,17 @@ class SyncPlan:
                     "downloaded_at": time.time(),
                 }
                 self._state_manager.write_file_entry(self._item_id, checkpoint)
+                verified_entries[path] = checkpoint
 
             downloader = Downloader(config=self._config)
-            downloader.download_files(
+            download_success = downloader.download_files(
                 [entry["file"] for entry in self._to_download],
                 destination=self._destination,
                 post_download_hook=_checkpoint,
             )
+            if not download_success or len(verified_entries) < len(self._to_download):
+                failed_count = len(self._to_download) - len(verified_entries)
+                print(f"{self._label}: {failed_count} file(s) failed to download or failed hash verification.")
 
         updated_state = self._state_manager.load_state(self._item_id) or {}
         local_map = {entry["path"]: entry for entry in updated_state.get("files", [])}
@@ -245,18 +263,27 @@ class SyncPlan:
         persisted_files = []
 
         for entry in self._remote_state["files"]:
-            previous = local_map.get(entry["path"])
-            timestamp = previous.get("downloaded_at") if previous and previous.get("file_hash") == entry["file_hash"] else now
-            persisted_files.append({
-                "path": entry["path"],
-                "file_hash": entry["file_hash"],
-                "content_hash": entry["content_hash"],
-                "size": entry.get("size", 0),
-                "downloaded_at": timestamp,
-            })
+            path = entry["path"]
+            if path in verified_entries:
+                persisted_files.append(verified_entries[path])
+            else:
+                previous = local_map.get(path)
+                if previous and previous.get("file_hash") == entry["file_hash"]:
+                    persisted_files.append({
+                        "path": path,
+                        "file_hash": entry["file_hash"],
+                        "content_hash": entry["content_hash"],
+                        "size": entry.get("size", 0),
+                        "downloaded_at": previous.get("downloaded_at", now),
+                    })
+                # else: download failed or hash mismatch — omit from state
 
-        self._state_manager.save_state(self._item_id, self._remote_state["combined_hash"], persisted_files)
-        print(f"{self._label} stored (version {self._remote_state['combined_hash'][:7]}).")
+        actual_combined = combined_mod_hash([e["file_hash"] for e in persisted_files])
+        self._state_manager.save_state(self._item_id, actual_combined, persisted_files)
+        if actual_combined == self._remote_state["combined_hash"]:
+            print(f"{self._label} stored (version {actual_combined[:7]}).")
+        else:
+            print(f"{self._label} partially stored ({len(persisted_files)}/{len(self._remote_state['files'])} files, version {actual_combined[:7]}).")
         return True
 
 
@@ -331,6 +358,27 @@ class ContentSyncer:
             )
 
         to_download, to_delete, unchanged = diff_states(remote_state, local_state)
+
+        if self._config.get("validate_local") and unchanged:
+            print(f"{label}: validating {len(unchanged)} local file(s) against disk...")
+            redownload = []
+            still_unchanged = []
+            for entry in unchanged:
+                local_path = os.path.normpath(entry["path"])
+                try:
+                    actual_hash = hash_file_content(local_path)
+                    if actual_hash != entry["content_hash"]:
+                        print(f"  Validation failed (hash mismatch): {entry['path']}")
+                        redownload.append(entry)
+                    else:
+                        still_unchanged.append(entry)
+                except OSError:
+                    print(f"  Validation failed (missing): {entry['path']}")
+                    redownload.append(entry)
+            if redownload:
+                print(f"{label}: {len(redownload)} file(s) failed validation, queued for re-download.")
+                to_download = to_download + redownload
+            unchanged = still_unchanged
 
         return SyncPlan(
             state_manager=self.state_manager,

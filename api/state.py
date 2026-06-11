@@ -28,6 +28,18 @@ def compute_file_hash(local_path, content_hash):
     return digest.hexdigest()
 
 
+def hash_file_content(path):
+    """Compute the SHA1 hex digest of a file's actual content on disk."""
+    digest = hashlib.sha1()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def combined_mod_hash(file_hashes):
     """Combine individual file hashes deterministically for state header."""
     digest = hashlib.sha1()
