@@ -84,7 +84,6 @@ class SteamSession:
         if self._client is None:
             self._client = SteamClient()
             self._client.login(self._username, self._password)
-            print("Logged in to Steam as", self._client.user.name)
         
         if self._cdn_client is None:
             self._cdn_client = self._build_cdn_client()
@@ -320,4 +319,5 @@ class SteamSession:
         """
         session = SteamSession(username, password, config=config)
         session._ensure_connected()
+        print("Logged in to Steam as", username)
         return session

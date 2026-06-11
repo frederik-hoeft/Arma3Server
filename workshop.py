@@ -68,16 +68,16 @@ def preset(mod_file, session, config=None):
     
     def build_plan(workshop_id):
         """Build sync plan for a single workshop item (runs in thread)."""
-        thread_session = get_thread_session()
-        try:
-            plan = thread_session.plan_workshop_sync(workshop_id)
-            with plans_lock:
-                plans.append((workshop_id, plan))
-        except Exception as e:
-            with plans_lock:
-                plans.append((workshop_id, None))
-            with progress_lock:
-                print(f"Failed to build sync plan for workshop {workshop_id}: {e}")
+        success: bool = False
+        while not success:
+            try:
+                thread_session = get_thread_session()
+                plan = thread_session.plan_workshop_sync(workshop_id)
+                with plans_lock:
+                    plans.append((workshop_id, plan))
+                success = True
+            except Exception as e:
+                pass # Ignore and retry; session will reset after consecutive failures
         
         # Thread-safe progress update
         with progress_lock:
