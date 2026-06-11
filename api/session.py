@@ -73,7 +73,6 @@ class SteamSession:
 
     def _reset_session(self):
         """Perform full session reset: new SteamClient, login, and CDNClient."""
-        print("Performing full Steam session reset...")
         self._client = None
         self._cdn_client = None
         self._consecutive_failures = 0
@@ -104,7 +103,6 @@ class SteamSession:
         with self._lock:
             self._consecutive_failures += 1
             if self._consecutive_failures >= self._config["cdn_session_reset_threshold"]:
-                print(f"Hit {self._consecutive_failures} consecutive failures, resetting session...")
                 self._reset_session()
                 return True
             return False
@@ -143,12 +141,10 @@ class SteamSession:
                     return result
                 except Exception as exc:
                     last_error = exc
-                    print(f"{op_name} failed (attempt {attempt}/{retries}): {exc}")
                     
                     should_retry = self._record_failure()
                     if should_retry:
                         session_reset_count += 1
-                        print(f"Session reset #{session_reset_count}, retrying {op_name}...")
                         break  # Break inner loop to restart with new session
                     
                     if attempt < retries:
