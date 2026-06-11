@@ -42,7 +42,7 @@ api_config = {
     "cdn_op_base_delay": env_float("ARMA_CDN_OP_BASE_DELAY", 1.5),
     "cdn_session_reset_threshold": env_int("ARMA_CDN_SESSION_RESET_THRESHOLD", 3),
     "download_max_workers": env_int("ARMA_DOWNLOAD_MAX_WORKERS", 4),
-    "plan_max_workers": env_int("ARMA_PLAN_MAX_WORKERS", 8),
+    "plan_max_workers": env_int("ARMA_PLAN_MAX_WORKERS", 2),
     "download_chunk_size": env_int("ARMA_DOWNLOAD_CHUNK_SIZE", 4 * 1024 * 1024),
     "download_progress_interval": env_int("ARMA_DOWNLOAD_PROGRESS_INTERVAL", 60),
     "validate_local": env_int("ARMA_VALIDATE_LOCAL", 0) == 1,
