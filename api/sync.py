@@ -343,7 +343,7 @@ class ContentSyncer:
             print(f"{label} index format changed, ignoring cached state.")
             local_state = None
 
-        if local_state and local_state.get("combined_hash") == remote_state["combined_hash"]:
+        if (local_state and local_state.get("combined_hash") == remote_state["combined_hash"] and not self._config.get("validate_local")):
             return SyncPlan(
                 state_manager=self.state_manager,
                 item_id=item_id,
@@ -390,4 +390,5 @@ class ContentSyncer:
             to_download=to_download,
             to_delete=to_delete,
             unchanged=unchanged,
+            up_to_date=(not to_download and not to_delete and unchanged)
         )
